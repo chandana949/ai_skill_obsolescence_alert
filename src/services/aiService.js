@@ -1,9 +1,21 @@
 // AI Service for SkillGuard
-// This service can be configured to use OpenAI, Anthropic, or other AI providers
+// Integrated with Google AI Studio and Gemini API
 
-const AI_API_KEY = import.meta.env.VITE_AI_API_KEY || '';
-const AI_API_URL = import.meta.env.VITE_AI_API_URL || 'https://api.openai.com/v1/chat/completions';
-const USE_MOCK_AI = import.meta.env.VITE_USE_MOCK_AI === 'true' || !AI_API_KEY;
+import { GoogleGenerativeAI } from '@google/generative-ai';
+
+const GEMINI_API_KEY = import.meta.env.VITE_GEMINI_API_KEY || '';
+const USE_MOCK_AI = import.meta.env.VITE_USE_MOCK_AI === 'true' || !GEMINI_API_KEY;
+const GEMINI_MODEL = import.meta.env.VITE_GEMINI_MODEL || 'gemini-pro';
+
+// Initialize Gemini AI client
+let genAI = null;
+if (GEMINI_API_KEY && !USE_MOCK_AI) {
+  try {
+    genAI = new GoogleGenerativeAI(GEMINI_API_KEY);
+  } catch (error) {
+    console.error('Failed to initialize Gemini AI:', error);
+  }
+}
 
 // Mock AI responses for development/demo
 const mockAIResponses = {
@@ -186,31 +198,59 @@ const mockAIResponses = {
   }
 };
 
-// Real AI API call (OpenAI format)
-async function callAIAPI(messages, model = 'gpt-3.5-turbo') {
+// Real AI API call using Google Gemini API
+async function callGeminiAPI(prompt, systemInstruction = null, conversationHistory = []) {
+  if (!genAI) {
+    throw new Error('Gemini AI not initialized');
+  }
+
   try {
-    const response = await fetch(AI_API_URL, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${AI_API_KEY}`
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature: 0.7,
-        max_tokens: 500
-      })
+    const model = genAI.getGenerativeModel({ 
+      model: GEMINI_MODEL,
+      systemInstruction: systemInstruction || 'You are a helpful AI assistant.'
     });
-    
-    if (!response.ok) {
-      throw new Error(`AI API error: ${response.statusText}`);
-    }
-    
-    const data = await response.json();
-    return data.choices[0].message.content;
+
+    // Build conversation history for Gemini
+    // Gemini uses a different format - we need to build the chat history
+    const history = conversationHistory.map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'model',
+      parts: [{ text: msg.content || msg.text }]
+    }));
+
+    const chat = model.startChat({
+      history: history,
+      generationConfig: {
+        temperature: 0.7,
+        maxOutputTokens: 500,
+      }
+    });
+
+    const result = await chat.sendMessage(prompt);
+    const response = await result.response;
+    return response.text();
   } catch (error) {
-    console.error('AI API Error:', error);
+    console.error('Gemini API Error:', error);
+    throw error;
+  }
+}
+
+// Helper function to call Gemini with a simple prompt (no chat history)
+async function callGeminiSimple(prompt, systemInstruction = null) {
+  if (!genAI) {
+    throw new Error('Gemini AI not initialized');
+  }
+
+  try {
+    const model = genAI.getGenerativeModel({ 
+      model: GEMINI_MODEL,
+      systemInstruction: systemInstruction || 'You are a helpful AI assistant.'
+    });
+
+    const result = await model.generateContent(prompt);
+    const response = await result.response;
+    return response.text();
+  } catch (error) {
+    console.error('Gemini API Error:', error);
     throw error;
   }
 }
@@ -225,16 +265,21 @@ export const aiService = {
       return mockAIResponses.analyzeSkills(role, skills, experience);
     }
     
-    const prompt = `Analyze the career profile of a ${role} with ${skills.length} skills: ${skills.join(', ')}. Experience level: ${experience} years. Provide insights about automation risk, career opportunities, and skill gaps. Return JSON with insights, riskFactors, and opportunities arrays.`;
+    const prompt = `Analyze the career profile of a ${role} with ${skills.length} skills: ${skills.join(', ')}. Experience level: ${experience} years. Provide insights about automation risk, career opportunities, and skill gaps. Return ONLY valid JSON with insights (array of strings), riskFactors (array of strings), and opportunities (array of strings). Do not include any markdown formatting or code blocks.`;
     
     try {
-      const response = await callAIAPI([
-        { role: 'system', content: 'You are a career advisor specializing in skill risk assessment and automation impact.' },
-        { role: 'user', content: prompt }
-      ]);
+      const systemInstruction = 'You are a career advisor specializing in skill risk assessment and automation impact. Always respond with valid JSON only.';
+      const response = await callGeminiSimple(prompt, systemInstruction);
       
-      return JSON.parse(response);
+      // Try to parse JSON, handling potential markdown code blocks
+      let jsonResponse = response.trim();
+      if (jsonResponse.startsWith('```')) {
+        jsonResponse = jsonResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      }
+      
+      return JSON.parse(jsonResponse);
     } catch (error) {
+      console.error('Error analyzing skills:', error);
       // Fallback to mock if API fails
       return mockAIResponses.analyzeSkills(role, skills, experience);
     }
@@ -247,16 +292,21 @@ export const aiService = {
       return mockAIResponses.generateRecommendations(role, skills, riskLevel);
     }
     
-    const prompt = `Generate 3-4 skill recommendations for a ${role} with risk level ${riskLevel}. Current skills: ${skills.join(', ')}. Focus on future-proof skills that reduce automation risk. Return JSON array with title, reasoning, and urgency fields.`;
+    const prompt = `Generate 3-4 skill recommendations for a ${role} with risk level ${riskLevel}. Current skills: ${skills.join(', ')}. Focus on future-proof skills that reduce automation risk. Return ONLY a valid JSON array with objects containing title (string), reasoning (string), and urgency (string: "High", "Medium", or "Low"). Do not include any markdown formatting or code blocks.`;
     
     try {
-      const response = await callAIAPI([
-        { role: 'system', content: 'You are a career development expert providing skill recommendations.' },
-        { role: 'user', content: prompt }
-      ]);
+      const systemInstruction = 'You are a career development expert providing skill recommendations. Always respond with valid JSON only.';
+      const response = await callGeminiSimple(prompt, systemInstruction);
       
-      return JSON.parse(response);
+      // Try to parse JSON, handling potential markdown code blocks
+      let jsonResponse = response.trim();
+      if (jsonResponse.startsWith('```')) {
+        jsonResponse = jsonResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      }
+      
+      return JSON.parse(jsonResponse);
     } catch (error) {
+      console.error('Error generating recommendations:', error);
       return mockAIResponses.generateRecommendations(role, skills, riskLevel);
     }
   },
@@ -268,27 +318,16 @@ export const aiService = {
       return mockAIResponses.chatResponse(message, context, conversationHistory);
     }
     
-    const systemPrompt = `You are a helpful career advisor for SkillGuard, an app that helps workers understand their automation risk. The user is a ${context.role || 'professional'} with skills: ${context.skills?.join(', ') || 'not specified'}. Provide helpful, encouraging advice. Be conversational and respond directly to what the user is asking.`;
+    const systemInstruction = `You are a helpful career advisor for SkillGuard, an app that helps workers understand their automation risk. The user is a ${context.role || 'professional'} with skills: ${context.skills?.join(', ') || 'not specified'}. Provide helpful, encouraging advice. Be conversational and respond directly to what the user is asking.`;
     
-    // Build message history for context
-    const messages = [
-      { role: 'system', content: systemPrompt }
-    ];
-    
-    // Add conversation history (last 5 messages for context)
-    const recentHistory = conversationHistory.slice(-5);
-    recentHistory.forEach(msg => {
-      messages.push({
-        role: msg.role === 'user' ? 'user' : 'assistant',
-        content: msg.text || msg.content
-      });
-    });
-    
-    // Add current message
-    messages.push({ role: 'user', content: message });
+    // Build conversation history for Gemini (last 5 messages for context)
+    const recentHistory = conversationHistory.slice(-5).map(msg => ({
+      role: msg.role === 'user' ? 'user' : 'model',
+      content: msg.text || msg.content
+    }));
     
     try {
-      const response = await callAIAPI(messages);
+      const response = await callGeminiAPI(message, systemInstruction, recentHistory);
       
       // Extract suggestions from response if any
       const suggestions = [];
@@ -305,6 +344,7 @@ export const aiService = {
         suggestions: suggestions.length > 0 ? suggestions : []
       };
     } catch (error) {
+      console.error('Error in chat:', error);
       return mockAIResponses.chatResponse(message, context, conversationHistory);
     }
   },
@@ -331,16 +371,21 @@ export const aiService = {
       };
     }
     
-    const prompt = `Create a detailed learning path for ${skillTitle} for a ${role}. Include steps, resources, and timeline. Return JSON with steps array, resources array, and timeline string.`;
+    const prompt = `Create a detailed learning path for ${skillTitle} for a ${role}. Include steps, resources, and timeline. Return ONLY valid JSON with steps (array of strings), resources (array of strings), and timeline (string). Do not include any markdown formatting or code blocks.`;
     
     try {
-      const response = await callAIAPI([
-        { role: 'system', content: 'You are an educational expert creating learning paths.' },
-        { role: 'user', content: prompt }
-      ]);
+      const systemInstruction = 'You are an educational expert creating learning paths. Always respond with valid JSON only.';
+      const response = await callGeminiSimple(prompt, systemInstruction);
       
-      return JSON.parse(response);
+      // Try to parse JSON, handling potential markdown code blocks
+      let jsonResponse = response.trim();
+      if (jsonResponse.startsWith('```')) {
+        jsonResponse = jsonResponse.replace(/```json\n?/g, '').replace(/```\n?/g, '').trim();
+      }
+      
+      return JSON.parse(jsonResponse);
     } catch (error) {
+      console.error('Error generating learning path:', error);
       return {
         steps: ["Research fundamentals", "Take courses", "Practice", "Build portfolio"],
         resources: ["Online courses", "Certifications", "Communities"],
